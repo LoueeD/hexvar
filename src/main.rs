@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
+mod css_color_names;
 
 /// Scan CSS/SCSS files for unique Hex colors and output JSON report
 #[derive(Parser)]
@@ -110,13 +111,135 @@ fn main() {
     // If requested, generate CSS variables file
     if let Some(css_path) = &cli.css_vars {
         use std::io::Write;
+        use palette::{Srgb, Lab, FromColor};
+        use palette::color_difference::DeltaE;
         let mut css = String::from(":root {\n");
+        let delta_e_threshold = 10.0;
+        let mut clusters: Vec<(String, Lab)> = Vec::new(); // (canonical hex, Lab)
+        let mut hex_to_canonical: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // Precompute LAB for all hexes
+        let mut hex_lab: std::collections::HashMap<&String, Lab> = std::collections::HashMap::new();
         for hex in counts.keys() {
-            let var = format!("--color-{}", hex.trim_start_matches('#').to_lowercase());
-            css.push_str(&format!("    {}: {};", var, hex));
+            let rgb = hex.trim_start_matches('#');
+            let (r, g, b) = match rgb.len() {
+                3 => {
+                    let r = u8::from_str_radix(&rgb[0..1].repeat(2), 16).unwrap_or(0);
+                    let g = u8::from_str_radix(&rgb[1..2].repeat(2), 16).unwrap_or(0);
+                    let b = u8::from_str_radix(&rgb[2..3].repeat(2), 16).unwrap_or(0);
+                    (r, g, b)
+                },
+                6 => {
+                    let r = u8::from_str_radix(&rgb[0..2], 16).unwrap_or(0);
+                    let g = u8::from_str_radix(&rgb[2..4], 16).unwrap_or(0);
+                    let b = u8::from_str_radix(&rgb[4..6], 16).unwrap_or(0);
+                    (r, g, b)
+                },
+                _ => { continue; }
+            };
+            let lab: Lab = Lab::from_color(Srgb::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0));
+            hex_lab.insert(hex, lab);
+        }
+        // Clustering
+        for hex in counts.keys() {
+            if let Some(&lab) = hex_lab.get(hex) {
+                let mut canonical: Option<String> = None;
+                for (canon_hex, canon_lab) in &clusters {
+                    if lab.delta_e(*canon_lab) < delta_e_threshold {
+                        canonical = Some(canon_hex.clone());
+                        break;
+                    }
+                }
+                if let Some(canon_hex) = canonical {
+                    hex_to_canonical.insert(hex.clone(), canon_hex);
+                } else {
+                    clusters.push((hex.clone(), lab));
+                    hex_to_canonical.insert(hex.clone(), hex.clone());
+                }
+            }
+        }
+        // Output CSS vars for canonical colors only
+        for (canon_hex, _) in &clusters {
+            // Try to find a CSS color name for this hex
+            let mut var = None;
+            for (name, css_hex) in css_color_names::CSS_COLOR_NAMES.iter() {
+                if css_hex.eq_ignore_ascii_case(canon_hex) {
+                    var = Some(format!("--color-{}", name.replace('_', "-")));
+                    break;
+                }
+            }
+            // If no exact match, find closest CSS color by Euclidean RGB distance
+            let var = var.unwrap_or_else(|| {
+                fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+                    let hex = hex.trim_start_matches('#');
+                    match hex.len() {
+                        3 => {
+                            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+                            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+                            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+                            Some((r, g, b))
+                        }
+                        6 => {
+                            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                            Some((r, g, b))
+                        }
+                        _ => None
+                    }
+                }
+                let (r, g, b) = match hex_to_rgb(canon_hex) {
+                    Some(rgb) => rgb,
+                    None => return format!("--color-{}", canon_hex.trim_start_matches('#').to_lowercase()),
+                };
+                let mut min_dist = u32::MAX;
+                let mut closest = None;
+                for (name, css_hex) in css_color_names::CSS_COLOR_NAMES.iter() {
+                    if let Some((cr, cg, cb)) = hex_to_rgb(css_hex) {
+                        let dist = (r as i32 - cr as i32).pow(2) as u32
+                                 + (g as i32 - cg as i32).pow(2) as u32
+                                 + (b as i32 - cb as i32).pow(2) as u32;
+                        if dist < min_dist {
+                            min_dist = dist;
+                            closest = Some(name);
+                        }
+                    }
+                }
+                if let Some(name) = closest {
+                    format!("--color-{}", name.replace('_', "-"))
+                } else {
+                    format!("--color-{}", canon_hex.trim_start_matches('#').to_lowercase())
+                }
+            });
+            css.push_str(&format!("    {}: {};", var, canon_hex));
             css.push('\n');
         }
         css.push_str("}\n");
+        // Build canonical_map for reporting
+        let mut canonical_map: std::collections::HashMap<&String, Vec<&String>> = std::collections::HashMap::new();
+        for (hex, canon) in &hex_to_canonical {
+            canonical_map.entry(canon).or_default().push(hex);
+        }
+        // Output the mapping of canonical hex -> all merged hexes
+        let map_path = "colours_map.json";
+        match std::fs::File::create(map_path) {
+            Ok(mut file) => {
+                if let Err(e) = serde_json::to_writer_pretty(&mut file, &canonical_map) {
+                    eprintln!("Failed to write mapping file {}: {}", map_path, e);
+                } else {
+                    println!("Wrote canonical color mapping to {}", map_path);
+                }
+            }
+            Err(e) => eprintln!("Failed to create mapping file {}: {}", map_path, e),
+        }
+        // CLI output about optimization
+        let unique_hexes = counts.len();
+        let canonical_count = canonical_map.len();
+        println!(
+            "Optimization: Reduced {unique_hexes} unique hex codes to {canonical_count} canonical CSS variables using perceptual color clustering (Delta E < {delta_e}).\nSee colours_map.json for mappings.",
+            unique_hexes = unique_hexes,
+            canonical_count = canonical_count,
+            delta_e = delta_e_threshold
+        );
         match std::fs::File::create(css_path) {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(css.as_bytes()) {
@@ -138,10 +261,9 @@ fn main() {
                 eprintln!("Failed to write output file {}: {}", out_path, e);
                 std::process::exit(1);
             }
-        },
+        }
         None => {
             println!("{}", json);
         }
     }
-
 }
