@@ -44,6 +44,23 @@ hexvar scan <glob> [--out <json>] [--css-vars <css>]
 - `--out <json>`: Output JSON file with hex code counts (default: stdout)
 - `--css-vars <css>`: Output CSS file with deduplicated variables
 
+---
+
+### Replace Command
+
+```
+hexvar replace <glob> [--ignore <pattern>]
+```
+
+- `<glob>`: Glob pattern(s) for files in which to replace hex codes (e.g. `src/**/*.css`)
+- `--ignore <pattern>`: Patterns or directories to ignore (e.g. `node_modules`)
+
+This command will replace all hex color codes in the matched files with their corresponding CSS custom properties (variables) as defined in `colours.css`. The mapping is determined by `colours_map.json`.
+
+**Warning:** The replace command is destructive—it will overwrite files in-place. Make sure you are using version control (e.g., git) and commit your changes before running this command to avoid accidental data loss.
+
+---
+
 ### Example Output
 
 **colours.css**

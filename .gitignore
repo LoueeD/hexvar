@@ -15,6 +15,7 @@ Cargo.lock
 # Output
 colours.json
 colours.css
+colours_map.json
 
 # OS
 Thumbs.db
