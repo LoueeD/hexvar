@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*.tmp
+.DS_Store
+
+# Output
+colours.json
+colours.css
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Misc
+*.log
